@@ -1,0 +1,44 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AssemblyName>LucHeart.WebsocketLibrary</AssemblyName>
+        <RootNamespace>LucHeart.WebsocketLibrary</RootNamespace>
+        <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+        <PackageId>LucHeart.WebsocketLibrary</PackageId>
+        <Title>LucHeart.WebsocketLibrary</Title>
+        <Authors>LucHeart</Authors>
+        <Company>LucHeart</Company>
+        <AssemblyVersion>1.0.0</AssemblyVersion>
+        <FileVersion>1.0.0</FileVersion>
+        <TargetFrameworks>net9.0;netstandard2.1</TargetFrameworks>
+        <LangVersion>13</LangVersion>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.1" />
+      <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
+      <PackageReference Include="OneOf" Version="3.0.271" />
+      <PackageReference Include="PolySharp" Version="1.14.1">
+        <PrivateAssets>all</PrivateAssets>
+        <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      </PackageReference>
+
+
+    </ItemGroup>
+
+    <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.1'">
+        <PackageReference Include="System.Text.Json" Version="8.0.5"/>
+        <PackageReference Include="System.ComponentModel.Annotations" Version="5.0.0"/>
+        <PackageReference Include="System.Net.Http.Json" Version="8.0.0"/>
+        <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.5.4" />
+        <PackageReference Include="System.Threading" Version="4.3.0" />
+        <PackageReference Include="System.Threading.Channels" Version="8.0.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="..\README.md" Pack="true" PackagePath="\"/>
+    </ItemGroup>
+    
+</Project>
