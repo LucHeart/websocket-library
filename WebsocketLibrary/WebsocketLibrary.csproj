@@ -14,6 +14,13 @@
         <FileVersion>1.0.0</FileVersion>
         <TargetFrameworks>net9.0;netstandard2.1</TargetFrameworks>
         <LangVersion>13</LangVersion>
+        <PackageProjectUrl>https://github.com/LucHeart/websocket-library</PackageProjectUrl>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+        <RepositoryType>git</RepositoryType>
+        <PackageTags>lucheart,websocket</PackageTags>
+        <IncludeSymbols>true</IncludeSymbols>
     </PropertyGroup>
 
     <ItemGroup>
