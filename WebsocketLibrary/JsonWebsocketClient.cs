@@ -44,6 +44,7 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
 
     public event Func<TRec, Task>? OnMessage; 
     public event Func<Task>? OnDispose;
+    public event Func<Task>? OnConnected;
     
     private async Task MessageLoop()
     {
@@ -65,7 +66,7 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
 
     public struct Reconnecting;
 
-    private async Task<OneOf.OneOf<Success, Reconnecting, Disposed>> ConnectAsync()
+    public async Task<OneOf.OneOf<Success, Reconnecting, Disposed>> ConnectAsync()
     {
         if (_dispose.IsCancellationRequested)
         {
@@ -104,8 +105,10 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
 #pragma warning disable CS4014
             Run(ReceiveLoop, _linked.Token);
             Run(MessageLoop, _linked.Token);
+            
+            Run(OnConnected.Raise);
 #pragma warning restore CS4014
-
+            
             return new Success();
         }
         catch (WebSocketException e)
@@ -125,6 +128,12 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
         Run(ConnectAsync, _dispose.Token);
 #pragma warning restore CS4014
         return new Reconnecting();
+    }
+
+    public async Task Stop()
+    {
+        if(_clientWebSocket == null) return;
+        await _clientWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Normal close", _dispose.Token);
     }
     
     private async Task ReceiveLoop()
@@ -228,7 +237,11 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
         _dispose.Cancel();
 #endif
         await OnDispose.Raise();
-        _clientWebSocket?.Dispose();
+        if (_clientWebSocket != null)
+        {
+            await _clientWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Normal close", _dispose.Token);
+            _clientWebSocket.Dispose();
+        }
     }
 
     public Task Run(Func<Task?> function, CancellationToken cancellationToken = default,

@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 
 namespace LucHeart.WebsocketLibrary;
 
-public class WebsocketClientOptions
+public sealed class WebsocketClientOptions
 {
     public ILogger? Logger { get; set; } = null;
     public JsonSerializerOptions? JsonSerializerOptions { get; set; } = null;
