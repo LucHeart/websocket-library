@@ -231,17 +231,26 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
         if (_disposed) return;
         _disposed = true;
 
+        if (_clientWebSocket != null)
+        {
+            try
+            {
+                await _clientWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Normal close", _dispose.Token);
+            }
+            catch (Exception e)
+            {
+                _logger?.LogError(e, "Error closing during dispose");
+            }
+            
+            _clientWebSocket.Dispose();
+        }
+        
 #if NET7_0_OR_GREATER
         await _dispose.CancelAsync();
 #else
         _dispose.Cancel();
 #endif
         await OnDispose.Raise();
-        if (_clientWebSocket != null)
-        {
-            await _clientWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Normal close", _dispose.Token);
-            _clientWebSocket.Dispose();
-        }
     }
 
     public Task Run(Func<Task?> function, CancellationToken cancellationToken = default,
