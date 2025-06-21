@@ -18,8 +18,7 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
     private ClientWebSocket? _clientWebSocket;
     
     private readonly CancellationTokenSource _dispose;
-    private CancellationTokenSource _linked;
-    private CancellationTokenSource? _currentConnectionClose;
+    private CancellationTokenSource? _currentConnectionToken;
     private readonly IDictionary<string, string> _headers = new Dictionary<string, string>();
     
     private Channel<TSend> _channel = Channel.CreateUnbounded<TSend>();
@@ -31,14 +30,13 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
         if (options?.Headers != null) _headers = options.Headers;
 
         _dispose = new CancellationTokenSource();
-        _linked = _dispose;
     }
 
     public ValueTask QueueMessage(TSend data) =>
         _channel.Writer.WriteAsync(data, _dispose.Token);
 
     private readonly AsyncUpdatableVariable<WebsocketConnectionState> _state =
-        new(WebsocketConnectionState.Disconnected);
+        new(WebsocketConnectionState.NotStarted);
 
     public IAsyncUpdatable<WebsocketConnectionState> State => _state;
 
@@ -46,12 +44,12 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
     public event Func<Task>? OnDispose;
     public event Func<Task>? OnConnected;
     
-    private async Task MessageLoop()
+    private async Task MessageLoop(Channel<TSend> channel, ClientWebSocket websocket, CancellationToken token)
     {
         try
         {
-            await foreach (var msg in _channel.Reader.ReadAllAsync(_linked.Token))
-                await JsonWebSocketUtils.SendFullMessage(msg, _clientWebSocket!, _linked.Token, _jsonSerializerOptions);
+            await foreach (var msg in channel.Reader.ReadAllAsync(token))
+                await JsonWebSocketUtils.SendFullMessage(msg, websocket, token, _jsonSerializerOptions);
         }
         catch (OperationCanceledException)
         {
@@ -62,72 +60,66 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
         }
     }
 
-    public struct Disposed;
-
-    public struct Reconnecting;
-
-    public async Task<OneOf.OneOf<Success, Reconnecting, Disposed>> ConnectAsync()
+    private bool _isStarted;
+    
+    /// <summary>
+    /// Start the websocket.
+    /// </summary>
+    /// <returns>False if it has been started before, or disposed</returns>
+    public bool StartAsync()
     {
-        if (_dispose.IsCancellationRequested)
+        if (_disposed)
         {
-            _logger?.LogWarning("Dispose requested, not connecting");
-            return new Disposed();
+            _logger?.LogWarning("StartAsync called after disposed, ignoring");
+            return false;
         }
-
-        _state.Value = WebsocketConnectionState.Connecting;
-#if NETSTANDARD2_1
-        _currentConnectionClose?.Cancel();
+        
+#if NET7_0_OR_GREATER
+        if(!Interlocked.CompareExchange(ref _isStarted, true, false))
+        {
+            _logger?.LogWarning("StartAsync called while already started, ignoring");
+            return false;
+        }
 #else
-        if (_currentConnectionClose != null) await _currentConnectionClose.CancelAsync();
+        if(_isStarted)
+        {
+            _logger?.LogWarning("StartAsync called while already started, ignoring");
+            return false;
+        }
+        
+        _isStarted = true;
 #endif
-        _currentConnectionClose = new CancellationTokenSource();
-        _linked = CancellationTokenSource.CreateLinkedTokenSource(_dispose.Token, _currentConnectionClose.Token);
 
-        _clientWebSocket?.Abort();
-        _clientWebSocket?.Dispose();
 
-        _channel = Channel.CreateUnbounded<TSend>();
-        _clientWebSocket = new ClientWebSocket();
+        Run(ReconnectionLoop);
         
-        foreach (var pair in _headers)
-        {
-            _clientWebSocket.Options.SetRequestHeader(pair.Key, pair.Value);
-        }
-        
-        _logger?.LogInformation("Connecting to websocket....");
-        try
-        {
-            await _clientWebSocket.ConnectAsync(_uri, _linked.Token);
+        return true;
+    }
 
-            _logger?.LogInformation("Connected to websocket");
-            _state.Value = WebsocketConnectionState.Connected;
+    private async Task ReconnectionLoop()
+    {
+        while (!_dispose.IsCancellationRequested)
+        {
+            try
+            {
+                await WebsocketLifetime();
+            }
+            catch (Exception e)
+            {
+                _logger?.LogError(e, "Error in websocket lifetime, reconnecting...");
+            }
 
-#pragma warning disable CS4014
-            Run(ReceiveLoop, _linked.Token);
-            Run(MessageLoop, _linked.Token);
+            if (_dispose.IsCancellationRequested)
+            {
+                _logger?.LogWarning("Dispose requested, not reconnecting");
+                _state.Value = WebsocketConnectionState.Disconnected;
+                return;
+            }
             
-            Run(OnConnected.Raise);
-#pragma warning restore CS4014
-            
-            return new Success();
-        }
-        catch (WebSocketException e)
-        {
-            _logger?.LogError(e, "Error while connecting, retrying in 3 seconds");
-        }
-        catch (Exception e)
-        {
-            _logger?.LogError(e, "Error while connecting, retrying in 3 seconds");
-        }
+            _state.Value = WebsocketConnectionState.WaitingForReconnect;
 
-        _state.Value = WebsocketConnectionState.Reconnecting;
-        _clientWebSocket.Abort();
-        _clientWebSocket.Dispose();
-        await Task.Delay(3000, _dispose.Token);
-#pragma warning disable CS4014
-        Run(ConnectAsync, _dispose.Token);
-#pragma warning restore CS4014
-        return new Reconnecting();
+            await Task.Delay(3000, _dispose.Token);
+        }
     }
 
     public async Task Stop()
@@ -135,93 +127,153 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
         if(_clientWebSocket == null) return;
         await _clientWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Normal close", _dispose.Token);
     }
-    
-    private async Task ReceiveLoop()
+
+    private async Task WebsocketLifetime()
     {
-        while (!_linked.Token.IsCancellationRequested)
+        _state.Value = WebsocketConnectionState.Connecting;
+        
+        _currentConnectionToken = new CancellationTokenSource();
+        var linked = CancellationTokenSource.CreateLinkedTokenSource(_dispose.Token, _currentConnectionToken.Token);
+        var cancellationToken = linked.Token;
+        
+        _channel = Channel.CreateUnbounded<TSend>();
+        ClientWebSocket currentClientWebSocket;
+        _clientWebSocket = currentClientWebSocket = new ClientWebSocket();
+        
+        foreach (var pair in _headers)
+        {
+            currentClientWebSocket.Options.SetRequestHeader(pair.Key, pair.Value);
+        }
+
+        if (await ConnectWebsocket(currentClientWebSocket, cancellationToken))
+        {
+#pragma warning disable CS4014
+            Run(MessageLoop(_channel, currentClientWebSocket, cancellationToken), cancellationToken);
+#pragma warning restore CS4014
+
+            _state.Value = WebsocketConnectionState.Connected;
+            
+            await NewReceiveLoop(currentClientWebSocket, cancellationToken);
+        }
+        
+        // Only send close if the socket is still open, this allows us to close the websocket from inside the logic
+        // We send close if the client sent a close message though
+        if (currentClientWebSocket is { State: WebSocketState.Open or WebSocketState.CloseReceived }) 
         {
             try
             {
-                if (_clientWebSocket!.State == WebSocketState.Aborted)
+                await currentClientWebSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Normal closure",
+                    _dispose.Token);
+            }
+            catch (TaskCanceledException) when (_dispose.IsCancellationRequested)
+            {
+                // Ignore, this happens when the websocket is disposed
+            }
+        }
+        
+        currentClientWebSocket.Abort();
+        currentClientWebSocket.Dispose();
+    }
+
+    private async Task<bool> ConnectWebsocket(ClientWebSocket webSocket, CancellationToken cancellationToken)
+    {
+        _logger?.LogInformation("Connecting to websocket....");
+        try
+        {
+            await webSocket.ConnectAsync(_uri, cancellationToken);
+
+            _logger?.LogInformation("Connected to websocket");
+            
+            Run(OnConnected.Raise);
+
+
+        }
+        catch (Exception e)
+        {
+            _logger?.LogError(e, "Error while connecting to websocket");
+            return false;
+        }
+
+        return true;
+    }
+    
+    private async Task NewReceiveLoop(ClientWebSocket webSocket, CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (webSocket.State is WebSocketState.CloseReceived or WebSocketState.CloseSent
+                    or WebSocketState.Closed)
                 {
-                    _logger?.LogWarning("Websocket connection aborted, closing loop");
-                    break;
+                    // Client or we sent close message or both, we will close the connection after this
+                    return;
                 }
 
-                var message =
-                    await JsonWebSocketUtils
-                        .ReceiveFullMessageAsyncNonAlloc<TRec>(_clientWebSocket, _linked.Token, _jsonSerializerOptions);
-
-                if (message.IsT2)
+                if (webSocket.State != WebSocketState.Open)
                 {
-                    if (_clientWebSocket.State != WebSocketState.Open)
-                    {
-                        _logger?.LogWarning("Client sent closure, but connection state is not open");
-                        break;
-                    }
-
-                    try
-                    {
-                        await _clientWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Normal close",
-                            _linked.Token);
-                    }
-                    catch (OperationCanceledException e)
-                    {
-                        _logger?.LogError(e, "Error during close handshake");
-                    }
-
-                    _logger?.LogInformation("Closing websocket connection");
-                    break;
+                    _logger?.LogWarning("WebSocket is not open [{State}], aborting", webSocket.State);
+                    webSocket.Abort();
+                    return;
                 }
 
-                message.Switch(wsMessage => { Run(OnMessage.Raise(wsMessage!)); },
-                    failed =>
-                    {
-                        _logger?.LogWarning("Deserialization failed for websocket message [{Message}] \n\n {Exception}",
-                            failed.Message,
-                            failed.Exception);
-                    },
-                    _ => { });
+                if (!await HandleReceive(webSocket, cancellationToken))
+                {
+                    // HandleReceive returned false, we will close the connection after this
+                    _logger?.LogDebug("HandleReceive returned false, closing connection");
+                    return;
+                }
+
             }
             catch (OperationCanceledException)
             {
-                _logger?.LogInformation("WebSocket connection terminated due to close or shutdown");
-                break;
+                return;
             }
-            catch (WebSocketException e)
+            catch (WebSocketException ex) when (ex.WebSocketErrorCode == WebSocketError.ConnectionClosedPrematurely)
             {
-                if (e.WebSocketErrorCode != WebSocketError.ConnectionClosedPrematurely)
-                    _logger?.LogError(e, "Error in receive loop, websocket exception");
+                // When we dont receive a close message from the client, we will get this exception
+                webSocket.Abort();
+                return;
             }
             catch (Exception ex)
             {
                 _logger?.LogError(ex, "Exception while processing websocket request");
+                webSocket.Abort();
+                return;
             }
         }
+    }
+    
+    private async Task<bool> HandleReceive(ClientWebSocket webSocket, CancellationToken cancellationToken)
+    {
+        var message =
+            await JsonWebSocketUtils.ReceiveFullMessageAsyncNonAlloc<TRec>(webSocket, cancellationToken);
 
-#if NETSTANDARD2_1
-        _currentConnectionClose?.Cancel();
-#else
-        await _currentConnectionClose!.CancelAsync();
-#endif
+        var continueLoop = await message.Match(async request =>
+            {
+                if (request is null)
+                {
+                    _logger?.LogWarning("Received null data from client");
+                    await ForceClose(webSocket, WebSocketCloseStatus.InvalidPayloadData, "Null json message received");
+                    return false;
+                }
 
-        if (_dispose.IsCancellationRequested)
-        {
-            _logger?.LogDebug("Dispose requested, not reconnecting");
-            return;
-        }
+                await OnMessage.Raise(request);
 
-        _logger?.LogWarning("Lost websocket connection, trying to reconnect in 3 seconds");
-        _state.Value = WebsocketConnectionState.Reconnecting;
+                return true;
+            },
+            async failed =>
+            {
+                _logger?.LogWarning(failed.Exception, "Deserialization failed for websocket message");
+                await ForceClose(webSocket, WebSocketCloseStatus.InvalidPayloadData, "Invalid json message received");
+                return false;
+            }, closure =>
+            {
+                _logger?.LogTrace("Client sent closure");
+                return Task.FromResult(false);
+            });
 
-        _clientWebSocket?.Abort();
-        _clientWebSocket?.Dispose();
-
-        await Task.Delay(3000, _dispose.Token);
-
-#pragma warning disable CS4014
-        Run(ConnectAsync, _dispose.Token);
-#pragma warning restore CS4014
+        return continueLoop;
     }
     
     private bool _disposed;
@@ -231,17 +283,18 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
         if (_disposed) return;
         _disposed = true;
 
-        if (_clientWebSocket != null)
+        if (_clientWebSocket is not null)
         {
             try
             {
-                await _clientWebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Normal close", _dispose.Token);
+                await ForceClose(_clientWebSocket, WebSocketCloseStatus.NormalClosure, "Normal close");
             }
             catch (Exception e)
             {
                 _logger?.LogError(e, "Error closing during dispose");
             }
             
+            _clientWebSocket.Abort();
             _clientWebSocket.Dispose();
         }
         
@@ -253,6 +306,20 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
         await OnDispose.Raise();
     }
 
+    private async Task ForceClose(ClientWebSocket webSocket, WebSocketCloseStatus closeStatus, string? statusDescription)
+    {
+#if NET7_0_OR_GREATER
+        if(_currentConnectionToken is not null) await _currentConnectionToken.CancelAsync();
+#else
+        _currentConnectionToken?.Cancel();
+#endif
+
+        if (webSocket is { State: WebSocketState.CloseReceived or WebSocketState.Open })
+        {
+            await webSocket.CloseOutputAsync(closeStatus, statusDescription, _dispose.Token);
+        }
+    }
+    
     public Task Run(Func<Task?> function, CancellationToken cancellationToken = default,
         [CallerFilePath] string file = "",
         [CallerMemberName] string member = "", [CallerLineNumber] int line = -1)

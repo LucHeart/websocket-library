@@ -9,11 +9,11 @@ namespace LucHeart.WebsocketLibrary.Utils;
 public static class JsonWebSocketUtils
 {
     private const uint MaxMessageSize = 512_000; // 512 000 bytes
-
+    
     public static readonly RecyclableMemoryStreamManager RecyclableMemory = new();
 
     public static async Task<OneOf.OneOf<T?, DeserializeFailed, WebsocketClosure>> ReceiveFullMessageAsyncNonAlloc<T>(
-        WebSocket socket, CancellationToken cancellationToken, JsonSerializerOptions jsonSerializerOptions)
+        WebSocket socket, CancellationToken cancellationToken)
     {
         var buffer = ArrayPool<byte>.Shared.Rent(4096);
         try
@@ -27,27 +27,21 @@ public static class JsonWebSocketUtils
                 bytes += result.Count;
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
-                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Closure during message read",
-                        cancellationToken);
                     return new WebsocketClosure();
                 }
 
                 if (buffer.Length + result.Count > MaxMessageSize) throw new MessageTooLongException();
-
+                
                 message.Write(buffer, 0, result.Count);
             } while (!result.EndOfMessage);
 
             try
             {
-                return JsonSerializer.Deserialize<T>(message.GetBuffer().AsSpan(0, bytes), jsonSerializerOptions);
+                return JsonSerializer.Deserialize<T>(message.GetBuffer().AsSpan(0, bytes));
             }
             catch (Exception e)
             {
-                return new DeserializeFailed
-                {
-                    Message = Encoding.UTF8.GetString(message.GetBuffer().AsSpan(0, bytes)),
-                    Exception = e
-                };
+                return new DeserializeFailed { Exception = e };
             }
         }
         finally
@@ -56,18 +50,16 @@ public static class JsonWebSocketUtils
         }
     }
 
-    public static Task SendFullMessage<T>(T obj, WebSocket socket, CancellationToken cancelToken,
-        JsonSerializerOptions jsonSerializerOptions, int maxChunkSize = 256) =>
-        SendFullMessageBytes(JsonSerializer.SerializeToUtf8Bytes(obj, jsonSerializerOptions), socket, cancelToken);
+    public static Task SendFullMessage<T>(T obj, WebSocket socket, CancellationToken cancelToken, JsonSerializerOptions serializerOptions, int bufferSize = 4096) =>
+        SendFullMessageBytes(JsonSerializer.SerializeToUtf8Bytes(obj, serializerOptions), socket, cancelToken, bufferSize);
 
-    public static async Task SendFullMessageBytes(byte[] msg, WebSocket socket, CancellationToken cancelToken,
-        int maxChunkSize = 256)
+    public static async Task SendFullMessageBytes(byte[] msg, WebSocket socket, CancellationToken cancelToken, int bufferSize)
     {
         var doneBytes = 0;
 
         while (doneBytes < msg.Length)
         {
-            var bytesProcessing = Math.Min(maxChunkSize, msg.Length - doneBytes);
+            var bytesProcessing = Math.Min(bufferSize, msg.Length - doneBytes);
             var buffer = msg.AsMemory(doneBytes, bytesProcessing);
 
             doneBytes += bytesProcessing;
@@ -79,11 +71,7 @@ public static class JsonWebSocketUtils
 /// <summary>
 /// When json deserialization fails
 /// </summary>
-public readonly struct DeserializeFailed
-{
-    public required string Message { get; init; }
-    public required Exception Exception { get; init; }
-}
+public readonly record struct DeserializeFailed(Exception Exception);
 
 /// <summary>
 /// When the websocket sent a close frame

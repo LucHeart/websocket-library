@@ -2,8 +2,9 @@
 
 public enum WebsocketConnectionState
 {
-    Disconnected = 0,
+    NotStarted = 0,
     Connecting = 1,
     Connected = 2,
-    Reconnecting = 3
+    WaitingForReconnect = 3,
+    Disconnected = 4,
 }
