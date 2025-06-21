@@ -1,6 +1,9 @@
-﻿namespace LucHeart.WebsocketLibrary.Updatables;
+﻿using OpenShock.MinimalEvents;
 
-public interface IAsyncUpdatable<out T> : IUpdatableBase<T>
+namespace LucHeart.WebsocketLibrary.Updatables;
+
+public interface IAsyncUpdatable<out T>
 {
-    public event Func<T, Task>? OnValueChanged;
+    public T Value { get; }
+    public IAsyncMinimalEventObservable<T> Updated { get; }
 }

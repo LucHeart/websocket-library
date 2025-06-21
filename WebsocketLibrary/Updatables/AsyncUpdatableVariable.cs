@@ -1,11 +1,9 @@
-﻿using LucHeart.WebsocketLibrary.Utils;
+﻿using OpenShock.MinimalEvents;
 
 namespace LucHeart.WebsocketLibrary.Updatables;
 
 public sealed class AsyncUpdatableVariable<T>(T internalValue) : IAsyncUpdatable<T>
 {
-    private T _internalValue = internalValue;
-
     public T Value
     {
         get => _internalValue;
@@ -13,12 +11,15 @@ public sealed class AsyncUpdatableVariable<T>(T internalValue) : IAsyncUpdatable
         {
             if (_internalValue!.Equals(value)) return;
             _internalValue = value;
-            Task.Run(() => OnValueChanged?.Raise(value));
+            Task.Run(() => _updated.InvokeAsyncParallel(value));
         }
     }
-    
-    public event Func<T, Task>? OnValueChanged;
-    
+
+    public IAsyncMinimalEventObservable<T> Updated => _updated;
+    private readonly AsyncMinimalEvent<T> _updated = new();
+    private T _internalValue = internalValue;
+
+
     public void UpdateWithoutNotify(T newValue)
     {
         _internalValue = newValue;
