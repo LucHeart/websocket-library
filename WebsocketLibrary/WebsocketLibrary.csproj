@@ -10,8 +10,9 @@
         <Title>LucHeart.WebsocketLibrary</Title>
         <Authors>LucHeart</Authors>
         <Company>LucHeart</Company>
-        <AssemblyVersion>1.0.0</AssemblyVersion>
-        <FileVersion>1.0.0</FileVersion>
+        <AssemblyVersion>$(Version)</AssemblyVersion>
+        <FileVersion>$(Version)</FileVersion>
+        <Version>1.0.1</Version>
         <TargetFrameworks>net9.0;netstandard2.1</TargetFrameworks>
         <LangVersion>13</LangVersion>
         <PackageProjectUrl>https://github.com/LucHeart/websocket-library</PackageProjectUrl>
@@ -41,8 +42,8 @@
         <PackageReference Include="System.Net.Http.Json" Version="9.0.6" />
         <PackageReference Include="System.Text.Json" Version="9.0.6" />
         <PackageReference Include="System.Threading" Version="4.3.0" />
-        <PackageReference Include="System.Threading.Channels" Version="9.0.0" />
-        <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.0" />
+        <PackageReference Include="System.Threading.Channels" Version="9.0.6" />
+        <PackageReference Include="System.Threading.Tasks.Extensions" Version="4.6.3" />
     </ItemGroup>
 
     <ItemGroup>

@@ -1,5 +1,7 @@
 ﻿using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using OneOf;
+using OneOf.Types;
 
 namespace LucHeart.WebsocketLibrary;
 
@@ -9,3 +11,10 @@ public sealed class WebsocketClientOptions
     public JsonSerializerOptions? JsonSerializerOptions { get; set; } = null;
     public IDictionary<string, string> Headers { get; set; } = new Dictionary<string, string>();
 }
+
+public readonly struct WebsocketConnectOptions
+{
+    public Uri Uri { get; init; }
+}
+
+public delegate Task<OneOf<WebsocketConnectOptions, Error>> WebsocketConnectHook();

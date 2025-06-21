@@ -5,14 +5,17 @@ using System.Threading.Channels;
 using LucHeart.WebsocketLibrary.Updatables;
 using LucHeart.WebsocketLibrary.Utils;
 using Microsoft.Extensions.Logging;
+using OneOf.Types;
 using OpenShock.MinimalEvents;
 
 namespace LucHeart.WebsocketLibrary;
 
 public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
 {
-    private readonly Uri _uri;
     private readonly JsonSerializerOptions _jsonSerializerOptions = JsonSerializerOptions.Default;
+
+    private bool _disposed;
+    private readonly WebsocketConnectHook _connectHook;
 
     private readonly ILogger? _logger;
     private ClientWebSocket? _clientWebSocket;
@@ -23,26 +26,45 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
 
     private Channel<TSend> _channel = Channel.CreateUnbounded<TSend>();
 
-    public JsonWebsocketClient(Uri uri, WebsocketClientOptions? options = null)
+    public JsonWebsocketClient(WebsocketConnectHook connectHook, WebsocketClientOptions? options = null) : this(options)
     {
-        _uri = uri;
-        _logger = options?.Logger;
-        if (options?.Headers != null) _headers = options.Headers;
+        _connectHook = connectHook;
+    }
 
+    public JsonWebsocketClient(Uri uri, WebsocketClientOptions? options = null) : this(options)
+    {
+        _connectHook = () => Task.FromResult(OneOf.OneOf<WebsocketConnectOptions, Error>.FromT0(
+            new WebsocketConnectOptions
+            {
+                Uri = uri
+            }));
+    }
+
+#pragma warning disable CS8618 // Connect hook is set by the two public constructors, so it is never null.
+    private JsonWebsocketClient(WebsocketClientOptions? options = null)
+#pragma warning restore CS8618
+    {
         _dispose = new CancellationTokenSource();
+
+        _logger = options?.Logger;
+        if (options is null) return;
+        _headers = options.Headers;
+
+        if (options.JsonSerializerOptions is not null)
+            _jsonSerializerOptions = options.JsonSerializerOptions;
     }
 
     public ValueTask QueueMessage(TSend data) =>
         _channel.Writer.WriteAsync(data, _dispose.Token);
 
+    public IAsyncUpdatable<WebsocketConnectionState> State => _state;
+
     private readonly AsyncUpdatableVariable<WebsocketConnectionState> _state =
         new(WebsocketConnectionState.NotStarted);
 
-    public IAsyncUpdatable<WebsocketConnectionState> State => _state;
-
     public IAsyncMinimalEventObservable<TRec> OnMessage => _onMessage;
     private readonly AsyncMinimalEvent<TRec> _onMessage = new();
-    
+
     private async Task MessageLoop(Channel<TSend> channel, ClientWebSocket websocket, CancellationToken token)
     {
         try
@@ -65,7 +87,7 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
     /// Start the websocket.
     /// </summary>
     /// <returns>False if it has been started before, or disposed</returns>
-    public bool StartAsync()
+    public bool Start()
     {
         if (_disposed)
         {
@@ -74,7 +96,7 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
         }
 
 #if NET7_0_OR_GREATER
-        if (!Interlocked.CompareExchange(ref _isStarted, true, false))
+        if (Interlocked.CompareExchange(ref _isStarted, true, false))
         {
             _logger?.LogWarning("StartAsync called while already started, ignoring");
             return false;
@@ -117,6 +139,7 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
 
             _state.Value = WebsocketConnectionState.WaitingForReconnect;
 
+            _logger?.LogInformation("Waiting for 3 seconds before reconnecting...");
             await Task.Delay(3000, _dispose.Token);
         }
     }
@@ -145,7 +168,7 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
 #pragma warning restore CS4014
 
             _state.Value = WebsocketConnectionState.Connected;
-
+            
             await NewReceiveLoop(currentClientWebSocket, cancellationToken);
         }
 
@@ -170,10 +193,19 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
 
     private async Task<bool> ConnectWebsocket(ClientWebSocket webSocket, CancellationToken cancellationToken)
     {
-        _logger?.LogDebug("Connecting to websocket....");
         try
         {
-            await webSocket.ConnectAsync(_uri, cancellationToken);
+            _logger?.LogDebug("Running connect hook");
+            var connectHook = await _connectHook.Invoke();
+            if (connectHook.IsT1)
+            {
+                _logger?.LogWarning("Websocket connection stopped, not connecting");
+                return false;
+            }
+
+            var uri = connectHook.AsT0.Uri;
+            _logger?.LogDebug("Connecting to websocket at {Uri}", uri);
+            await webSocket.ConnectAsync(uri, cancellationToken);
 
             _logger?.LogInformation("Connected to websocket");
         }
@@ -245,7 +277,8 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
                     await ForceClose(webSocket, WebSocketCloseStatus.InvalidPayloadData, "Null json message received");
                     return false;
                 }
-                
+
+
 #pragma warning disable CS4014
                 Run(async () => await _onMessage.InvokeAsyncParallel(request));
 #pragma warning restore CS4014
@@ -265,8 +298,6 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
 
         return continueLoop;
     }
-
-    private bool _disposed;
 
     public async ValueTask DisposeAsync()
     {
