@@ -12,7 +12,7 @@
         <Company>LucHeart</Company>
         <AssemblyVersion>$(Version)</AssemblyVersion>
         <FileVersion>$(Version)</FileVersion>
-        <Version>1.0.1</Version>
+        <Version>1.1.0</Version>
         <TargetFrameworks>net9.0;netstandard2.1</TargetFrameworks>
         <LangVersion>13</LangVersion>
         <PackageProjectUrl>https://github.com/LucHeart/websocket-library</PackageProjectUrl>

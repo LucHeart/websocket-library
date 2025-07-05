@@ -2,6 +2,7 @@
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading.Channels;
+using LucHeart.WebsocketLibrary.Reconnection;
 using LucHeart.WebsocketLibrary.Updatables;
 using LucHeart.WebsocketLibrary.Utils;
 using Microsoft.Extensions.Logging;
@@ -23,6 +24,8 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
     private readonly CancellationTokenSource _dispose;
     private CancellationTokenSource? _currentConnectionToken;
     private readonly IDictionary<string, string> _headers = new Dictionary<string, string>();
+    private IReconnectPolicy _reconnectPolicy;
+    private ReconnectionContext _reconnectionContext = new();
 
     private Channel<TSend> _channel = Channel.CreateUnbounded<TSend>();
 
@@ -47,6 +50,9 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
         _dispose = new CancellationTokenSource();
 
         _logger = options?.Logger;
+
+        _reconnectPolicy = options?.ReconnectPolicy ?? new DefaultReconnectPolicy();
+
         if (options is null) return;
         _headers = options.Headers;
 
@@ -138,9 +144,11 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
             }
 
             _state.Value = WebsocketConnectionState.WaitingForReconnect;
-
-            _logger?.LogInformation("Waiting for 3 seconds before reconnecting...");
-            await Task.Delay(3000, _dispose.Token);
+            
+            _reconnectionContext.Attempt += 1;
+            var waitTime = _reconnectPolicy.NextReconnectionDelay(_reconnectionContext);
+            _logger?.LogInformation("Waiting for {WaitTime} seconds before reconnecting, attempt {Attempt}", waitTime, _reconnectionContext.Attempt);
+            await Task.Delay(waitTime, _dispose.Token);
         }
     }
 
@@ -167,8 +175,9 @@ public sealed class JsonWebsocketClient<TRec, TSend> : IAsyncDisposable
             Run(MessageLoop(_channel, currentClientWebSocket, cancellationToken), cancellationToken);
 #pragma warning restore CS4014
 
+            _reconnectionContext.Attempt = 0;
             _state.Value = WebsocketConnectionState.Connected;
-            
+
             await NewReceiveLoop(currentClientWebSocket, cancellationToken);
         }
 
